@@ -126,14 +126,29 @@ def process_csv_file(file_path, session_dir):
         # Rename incoming columns used for matching.
         incoming_df.rename(columns={"Cartons*": "Cartons", "Pieces*": "Individual Pieces"}, inplace=True)
         
-        # Define mapping for additional fields using header names:
-        additional_mapping = {
+        # **INTELLIGENT ADDITIONAL FIELD MAPPING**: Map field names flexibly
+        additional_mapping_rules = {
             "Invoice Date": "Order Date",
-            "Ship-to Name": "Ship To Name",
+            "Ship-to Name": "Ship To Name", 
             "Order No.": "Purchase Order No.",
             "Delivery Date": "Start Date",
             "Cancel Date": "Cancel Date"
         }
+        
+        # Map additional fields intelligently
+        additional_mapping = {}
+        for incoming_field, pdf_field in additional_mapping_rules.items():
+            incoming_match = find_column_match(incoming_field, incoming_df.columns)
+            pdf_match = find_column_match(pdf_field, existing_df.columns)
+            
+            if incoming_match and pdf_match:
+                additional_mapping[incoming_match] = pdf_match
+                print(f"✅ Additional field mapped: '{incoming_match}' -> '{pdf_match}'")
+            else:
+                if not incoming_match:
+                    print(f"⚠️ Incoming field '{incoming_field}' not found (optional)")
+                if not pdf_match:
+                    print(f"⚠️ PDF field '{pdf_field}' not found (optional)")
         
         # Read existing combined CSV (from PDF processing) from session directory
         combined_csv_path = os.path.join(session_dir, OUTPUT_CSV_NAME)
@@ -141,29 +156,87 @@ def process_csv_file(file_path, session_dir):
             return False, "No PDF data processed yet. Please process PDF first."
         existing_df = pd.read_csv(combined_csv_path, dtype=str)
         
-        # Ensure matching columns exist in both DataFrames.
-        matching_columns = ["Invoice No.", "Style", "Cartons", "Individual Pieces"]
-        for col in matching_columns:
-            if col not in existing_df.columns:
-                return False, f"Column '{col}' not found in PDF CSV data."
-            if col not in incoming_df.columns:
-                return False, f"Column '{col}' not found in incoming file."
+        # **ENHANCED DEBUGGING**: Show what columns actually exist
+        print(f"📊 PDF CSV columns available: {list(existing_df.columns)}")
+        print(f"📊 Incoming CSV columns available: {list(incoming_df.columns)}")
         
-        # Create a composite match key in both DataFrames.
+        # **INTELLIGENT COLUMN MAPPING**: Handle variations in column names
+        def find_column_match(target_col, available_cols):
+            """Find the best match for a target column in available columns."""
+            # Exact match first
+            if target_col in available_cols:
+                return target_col
+            
+            # Case-insensitive match
+            target_lower = target_col.lower()
+            for col in available_cols:
+                if col.lower() == target_lower:
+                    return col
+            
+            # Partial match (contains target or target contains column)
+            for col in available_cols:
+                col_lower = col.lower()
+                if target_lower in col_lower or col_lower in target_lower:
+                    return col
+            
+            # Special mappings for common variations
+            mappings = {
+                'cartons': ['carton', 'ctns', 'ctn', 'boxes', 'box'],
+                'individual pieces': ['pieces', 'pcs', 'individual', 'piece'],
+                'invoice no.': ['invoice', 'inv no', 'invoice number', 'inv#'],
+                'style': ['style no', 'style number', 'item', 'product']
+            }
+            
+            target_key = target_lower.replace('.', '').replace(' ', '')
+            if target_key in mappings:
+                for variant in mappings[target_key]:
+                    for col in available_cols:
+                        if variant in col.lower():
+                            return col
+            
+            return None
+        
+        # Map columns intelligently
+        matching_columns_map = {}
+        required_columns = ["Invoice No.", "Style", "Cartons", "Individual Pieces"]
+        
+        for req_col in required_columns:
+            # Find in PDF data
+            pdf_match = find_column_match(req_col, existing_df.columns)
+            if not pdf_match:
+                return False, f"Column '{req_col}' not found in PDF CSV data. Available columns: {list(existing_df.columns)}"
+            
+            # Find in incoming data  
+            csv_match = find_column_match(req_col, incoming_df.columns)
+            if not csv_match:
+                return False, f"Column '{req_col}' not found in incoming file. Available columns: {list(incoming_df.columns)}"
+            
+            matching_columns_map[req_col] = {'pdf': pdf_match, 'csv': csv_match}
+            print(f"✅ Mapped '{req_col}': PDF='{pdf_match}', CSV='{csv_match}'")
+        
+        # Use the mapped column names for matching
+        matching_columns = [matching_columns_map[col]['pdf'] for col in required_columns]
+        
+        # Create a composite match key in both DataFrames using mapped columns
         def create_match_key(df, cols):
             return df[cols].fillna('').apply(
                 lambda row: "_".join([str(x).strip().replace(",", "").lower() for x in row]),
                 axis=1
             )
         
-        key_cols = matching_columns
-        existing_df["match_key"] = create_match_key(existing_df, key_cols)
-        incoming_df["match_key"] = create_match_key(incoming_df, key_cols)
+        # Use mapped column names for key creation
+        pdf_key_cols = [matching_columns_map[col]['pdf'] for col in required_columns]
+        csv_key_cols = [matching_columns_map[col]['csv'] for col in required_columns]
+        
+        existing_df["match_key"] = create_match_key(existing_df, pdf_key_cols)
+        incoming_df["match_key"] = create_match_key(incoming_df, csv_key_cols)
         
         print("Existing DataFrame match keys:")
-        print(existing_df[["Invoice No.", "Style", "Cartons", "Individual Pieces", "match_key"]].head(20))
+        debug_cols_pdf = pdf_key_cols + ["match_key"]
+        print(existing_df[debug_cols_pdf].head(20))
         print("Incoming DataFrame match keys:")
-        print(incoming_df[["Invoice No.", "Style", "Cartons", "Individual Pieces", "match_key"]].head(20))
+        debug_cols_csv = csv_key_cols + ["match_key"]
+        print(incoming_df[debug_cols_csv].head(20))
         
         # Merge: update existing_df rows using incoming additional mapping.
         for idx, inc_row in incoming_df.iterrows():
@@ -588,7 +661,28 @@ def upload_file():
                 'details': 'Could not create final CSV file. Check server logs for more details.',
                 'session_id': processor.session_id
             }), 500
-            
+        
+        # **ENHANCED DEBUGGING**: Check what columns were created in the final CSV
+        combined_csv_path = os.path.join(processor.session_dir, OUTPUT_CSV_NAME)
+        if os.path.exists(combined_csv_path):
+            try:
+                import pandas as pd
+                debug_df = pd.read_csv(combined_csv_path, nrows=1)  # Just read header
+                created_columns = list(debug_df.columns)
+                print(f"📊 SUCCESS: Final CSV created with columns: {created_columns}")
+                
+                # Check for required columns that CSV upload will need
+                required_for_merge = ["Invoice No.", "Style", "Cartons", "Individual Pieces"]
+                missing_columns = [col for col in required_for_merge if col not in created_columns]
+                if missing_columns:
+                    print(f"⚠️ WARNING: Missing columns that CSV merge will need: {missing_columns}")
+                    print(f"⚠️ This will cause CSV upload to fail unless the PDF contains this data")
+                else:
+                    print(f"✅ All required merge columns present: {required_for_merge}")
+                    
+            except Exception as debug_error:
+                print(f"⚠️ Could not debug CSV columns: {str(debug_error)}")
+        
         print("✅ PDF processed successfully!")
         return jsonify({
             'message': 'PDF processed successfully',
@@ -1666,6 +1760,73 @@ def debug_sessions():
         return jsonify({
             'error': str(e),
             'message': 'Debug session failed'
+        }), 500
+
+@app.route('/debug-csv')
+def debug_csv():
+    """Debug endpoint to inspect CSV structure and data."""
+    try:
+        # Get existing processor with session directory
+        processor = get_or_create_session()
+        combined_csv_path = os.path.join(processor.session_dir, OUTPUT_CSV_NAME)
+        
+        debug_info = {
+            'session_id': processor.session_id,
+            'csv_file_exists': os.path.exists(combined_csv_path),
+            'csv_path': combined_csv_path
+        }
+        
+        if os.path.exists(combined_csv_path):
+            try:
+                # Read CSV and get structure info
+                df = pd.read_csv(combined_csv_path, dtype=str)
+                debug_info.update({
+                    'total_rows': len(df),
+                    'total_columns': len(df.columns),
+                    'columns': list(df.columns),
+                    'sample_data': df.head(3).to_dict('records') if len(df) > 0 else [],
+                    'file_size_bytes': os.path.getsize(combined_csv_path)
+                })
+                
+                # Check for required merge columns
+                required_columns = ["Invoice No.", "Style", "Cartons", "Individual Pieces"]
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                
+                debug_info.update({
+                    'required_for_merge': required_columns,
+                    'missing_columns': missing_columns,
+                    'has_all_required': len(missing_columns) == 0,
+                    'merge_ready': len(missing_columns) == 0
+                })
+                
+                # Column similarity analysis (in case of slight name differences)
+                column_similarities = {}
+                for req_col in required_columns:
+                    if req_col not in df.columns:
+                        # Find similar column names
+                        similar_cols = []
+                        req_lower = req_col.lower()
+                        for actual_col in df.columns:
+                            actual_lower = actual_col.lower()
+                            if req_lower in actual_lower or actual_lower in req_lower:
+                                similar_cols.append(actual_col)
+                        column_similarities[req_col] = similar_cols
+                
+                debug_info['column_similarities'] = column_similarities
+                
+            except Exception as csv_error:
+                debug_info['csv_error'] = str(csv_error)
+                debug_info['error_type'] = 'csv_read_error'
+        else:
+            debug_info['error_type'] = 'csv_not_found'
+            debug_info['message'] = 'No CSV file found. Upload and process a PDF first.'
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'message': 'CSV debug failed'
         }), 500
 
 @app.route('/debug-request', methods=['GET', 'POST', 'PUT', 'DELETE'])
