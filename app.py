@@ -8,6 +8,7 @@ import platform
 import pandas as pd
 from io import StringIO
 from flask import Flask, render_template, request, send_file, jsonify, session, make_response
+from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
 from pdf_processor import PDFProcessor
 from data_processor import DataProcessor
@@ -15,20 +16,37 @@ from csv_exporter import CSVExporter
 from config import OUTPUT_CSV_NAME  # e.g. "combined_data.csv"
 
 app = Flask(__name__)
+
+# **ENHANCED CORS CONFIGURATION FOR CROSS-ORIGIN SUPPORT**
+# Configure CORS to allow all origins and methods for maximum compatibility
+CORS(app, 
+     origins="*",  # Allow all origins
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Cache-Control", 
+                   "Pragma", "Expires", "X-API-Key", "X-Custom-Header", "X-Session-ID",
+                   "Accept", "Origin", "X-CSRF-Token", "X-Forwarded-For"],
+     expose_headers=["Content-Disposition", "X-Session-ID", "Location"],
+     supports_credentials=False,  # Must be False when origins="*"
+     max_age=86400)  # Cache preflight for 24 hours
+
 app.config['UPLOAD_FOLDER'] = os.path.dirname(os.path.abspath(__file__))
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-# Cookie configuration for cross-origin support
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'  # Allow cookie in iframe
-# Auto-detect HTTPS environment for secure cookies
-is_production = os.environ.get('RENDER') or os.environ.get('RAILWAY') or os.environ.get('HEROKU')
-app.config['SESSION_COOKIE_SECURE'] = bool(is_production)  # Required for SameSite=None on HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True  # Security best practice
-app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # Session expires after 1 hour
-app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')  # Use env var in production
 
-# Log cookie configuration for debugging
-cookie_config = f"SameSite=None, Secure={app.config['SESSION_COOKIE_SECURE']}, HttpOnly={app.config['SESSION_COOKIE_HTTPONLY']}"
+# Auto-detect HTTPS environment
+is_production = os.environ.get('RENDER') or os.environ.get('RAILWAY') or os.environ.get('HEROKU')
+
+# **SIMPLIFIED COOKIE CONFIGURATION** 
+# Remove problematic cross-origin cookie settings that can interfere with CORS
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Changed from 'None' to 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = bool(is_production)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # Session expires after 1 hour
+app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here-for-bol-extractor')  # Use env var in production
+
+# Log CORS and cookie configuration for debugging
+cookie_config = f"SameSite={app.config['SESSION_COOKIE_SAMESITE']}, Secure={app.config['SESSION_COOKIE_SECURE']}, HttpOnly={app.config['SESSION_COOKIE_HTTPONLY']}"
 print(f"🍪 Cookie Configuration: {cookie_config} (Production: {bool(is_production)})")
+print(f"🌐 CORS Configuration: Enabled with flask-cors - All origins allowed, All methods supported")
 
 # Allowed extensions for PDF upload
 ALLOWED_PDF_EXTENSIONS = {'pdf'}
@@ -2173,45 +2191,23 @@ def auto_clean_session():
             'message': 'Auto-clean session failed'
         }), 500
 
-@app.before_request
-def handle_preflight():
-    """Handle CORS preflight requests."""
-    if request.method == "OPTIONS":
-        response = make_response()
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers['Access-Control-Allow-Headers'] = "Content-Type,Authorization,X-Requested-With,Cache-Control,Pragma,Expires,X-API-Key,X-Custom-Header,X-Session-ID"
-        response.headers['Access-Control-Allow-Methods'] = "GET,PUT,POST,DELETE,OPTIONS"
-        response.headers['Access-Control-Max-Age'] = '86400'
-        return response
-
-@app.route('/<path:path>', methods=['OPTIONS'])
-def handle_options(path):
-    """Handle OPTIONS requests for all paths."""
-    response = make_response()
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers['Access-Control-Allow-Headers'] = "Content-Type,Authorization,X-Requested-With,Cache-Control,Pragma,Expires,X-API-Key,X-Custom-Header,X-Session-ID"
-    response.headers['Access-Control-Allow-Methods'] = "GET,PUT,POST,DELETE,OPTIONS"
-    response.headers['Access-Control-Max-Age'] = '86400'
-    return response
-
 @app.after_request
 def after_request(response):
-    """Add headers to allow iframe embedding and CORS."""
-    # Remove any existing CORS headers to prevent duplicates
-    response.headers.pop('Access-Control-Allow-Origin', None)
-    response.headers.pop('Access-Control-Allow-Headers', None)
-    response.headers.pop('Access-Control-Allow-Methods', None)
-    response.headers.pop('Access-Control-Allow-Credentials', None)
-    response.headers.pop('Access-Control-Expose-Headers', None)
-    
-    # Add fresh CORS headers
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With,Cache-Control,Pragma,Expires,X-API-Key,X-Custom-Header,X-Session-ID'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
-    response.headers['Access-Control-Allow-Credentials'] = 'false'
-    response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
-    response.headers['X-Frame-Options'] = 'ALLOWALL'
+    """Add additional security headers (CORS is handled by flask-cors)."""
+    # Security headers (CORS is now handled by flask-cors automatically)
+    response.headers['X-Frame-Options'] = 'ALLOWALL'  # Allow iframe embedding
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    
+    # Ensure Content-Disposition is exposed for file downloads
+    if 'Content-Disposition' in response.headers:
+        # flask-cors should handle this, but ensure it's exposed
+        cors_headers = response.headers.get('Access-Control-Expose-Headers', '')
+        if 'Content-Disposition' not in cors_headers:
+            if cors_headers:
+                response.headers['Access-Control-Expose-Headers'] = cors_headers + ',Content-Disposition'
+            else:
+                response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
+    
     return response
 
 if __name__ == '__main__':
